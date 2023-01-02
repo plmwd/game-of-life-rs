@@ -1,16 +1,23 @@
 #![allow(dead_code)]
 
 use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture},
+    event::{poll, read, DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEvent},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use std::{collections::HashSet, io, thread, time::Duration};
+use std::{collections::HashSet, fmt::Display, io, str::FromStr, thread, time::Duration};
 use tui::{
     backend::CrosstermBackend,
-    widgets::{Block, Borders},
+    style::Color,
+    symbols,
+    widgets::{
+        canvas::{Canvas, Line, Map, MapResolution, Rectangle},
+        Block, Borders, Widget,
+    },
     Terminal,
 };
+
+// TODO: impl FromStr for Board
 
 // Steps:
 // 1. Iterate through each alive cell and perform GoL rules
@@ -28,16 +35,109 @@ use tui::{
 //      - visited cells
 //      - birth/death of cells
 
-#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
-struct Position {
+#[derive(Debug, Default, PartialEq, Eq, Hash, Clone, Copy)]
+struct Point {
     x: i64,
     y: i64,
 }
 
+impl std::ops::Add for Point {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        Point {
+            x: self.x + rhs.x,
+            y: self.y + rhs.y,
+        }
+    }
+}
+
+impl std::ops::AddAssign for Point {
+    fn add_assign(&mut self, rhs: Self) {
+        self.x += rhs.x;
+        self.y += rhs.y;
+    }
+}
+
+impl std::ops::Sub for Point {
+    type Output = Self;
+
+    fn sub(self, rhs: Self) -> Self::Output {
+        Point {
+            x: self.x - rhs.x,
+            y: self.y - rhs.y,
+        }
+    }
+}
+
+impl std::ops::SubAssign for Point {
+    fn sub_assign(&mut self, rhs: Self) {
+        self.x -= rhs.x;
+        self.y -= rhs.y;
+    }
+}
+
+impl Point {
+    fn new(x: i64, y: i64) -> Self {
+        Point { x, y }
+    }
+
+    fn x(x: i64) -> Self {
+        Point {
+            x,
+            ..Default::default()
+        }
+    }
+
+    fn y(y: i64) -> Self {
+        Point {
+            y,
+            ..Default::default()
+        }
+    }
+
+    fn dx(&mut self, x: i64) {
+        self.x += x;
+    }
+
+    fn dy(&mut self, y: i64) {
+        self.y += y;
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum Cell {
-    Dead(Position),
-    Alive(Position),
+    Dead(Point),
+    Alive(Point),
+}
+
+#[derive(Debug)]
+struct GameError {
+    kind: GameErrorKind,
+}
+
+impl GameError {
+    fn new(kind: GameErrorKind) -> Self {
+        GameError { kind }
+    }
+}
+
+#[derive(Debug)]
+enum GameErrorKind {
+    InvalidBoardChar { c: char, line: u16, s: String },
+}
+
+impl std::error::Error for GameError {}
+
+impl Display for GameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.kind {
+            GameErrorKind::InvalidBoardChar { c, line, s } => f.write_fmt(format_args!(
+                "Invalid char `{}` found on line {} when parsing\n{}\n into Board",
+                c, line, s
+            )),
+        }
+    }
 }
 
 // Need to:
@@ -47,7 +147,7 @@ enum Cell {
 // 4. Add/remove (x, y) cell
 #[derive(Debug, Default, PartialEq, Clone)]
 struct Board {
-    board: HashSet<Position>,
+    board: HashSet<Point>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -60,21 +160,25 @@ enum Direction {
 
 struct Neighbors<'a> {
     board: &'a Board,
-    pos: Position,
+    pos: Point,
     which: u8,
 }
 
-impl From<(i64, i64)> for Position {
+impl From<(i64, i64)> for Point {
     fn from(value: (i64, i64)) -> Self {
-        Position {
+        Point {
             x: value.0,
             y: value.1,
         }
     }
 }
 
+// TODO: create BoardWidget and implement Widget
+// TODO: create methods to create from Board
+// TODO: pan/zoom by passing in area: Rect with different offset, width, and height
+
 impl<'a> Neighbors<'a> {
-    fn new(board: &'a Board, pos: Position) -> Neighbors<'a> {
+    fn new(board: &'a Board, pos: Point) -> Neighbors<'a> {
         Neighbors {
             board,
             pos,
@@ -93,7 +197,7 @@ impl Iterator for Neighbors<'_> {
     }
 
     fn next(&mut self) -> Option<Self::Item> {
-        let Position { x, y } = self.pos;
+        let Point { x, y } = self.pos;
         let pos = match self.which {
             // right
             0 => (x + 1, y),
@@ -122,35 +226,119 @@ impl Iterator for Neighbors<'_> {
 impl ExactSizeIterator for Neighbors<'_> {}
 
 impl Board {
-    fn query(&self, pos: &Position) -> Cell {
+    fn query(&self, pos: &Point) -> Cell {
         match self.board.contains(pos) {
             true => Cell::Alive(*pos),
             false => Cell::Dead(*pos),
         }
     }
 
-    fn neighbors(&self, pos: &Position) -> Neighbors<'_> {
-        Neighbors::new(self, *pos)
+    fn neighbors(&self, p: &Point) -> Neighbors<'_> {
+        Neighbors::new(self, *p)
     }
 
-    fn birth_cell(&mut self, pos: &Position) {
-        self.board.insert(*pos);
+    fn birth_cell(&mut self, p: &Point) {
+        self.board.insert(*p);
     }
 
-    fn kill_cell(&mut self, pos: &Position) {
-        self.board.remove(pos);
+    fn kill_cell(&mut self, p: &Point) {
+        self.board.remove(p);
     }
 
-    fn iter(&self) -> impl Iterator<Item = &Position> + '_ {
+    fn iter(&self) -> impl Iterator<Item = &Point> + '_ {
         self.board.iter()
+    }
+
+    fn window(
+        &self,
+        point: Point,
+        width: u16,
+        height: u16,
+    ) -> impl Iterator<Item = (&Point, u16, u16)> + '_ {
+        self.board.iter().filter_map(move |p| {
+            let dx = p.x - point.x;
+            let dy = p.y - point.y;
+            if dx >= 0 && dx < width.into() && dy >= 0 && dy < height.into() {
+                Some((p, dx as u16, dy as u16))
+            } else {
+                None
+            }
+        })
     }
 }
 
-impl<const N: usize> From<[Position; N]> for Board {
-    fn from(value: [Position; N]) -> Self {
+impl<const N: usize> From<[Point; N]> for Board {
+    fn from(value: [Point; N]) -> Self {
         Board {
             board: HashSet::from(value),
         }
+    }
+}
+
+struct BoardWidget<'b> {
+    board: &'b Board,
+    origin: Point,
+    // TODO: zoom
+}
+
+impl<'b> BoardWidget<'b> {
+    fn new(board: &'b Board) -> Self {
+        BoardWidget {
+            board,
+            origin: Default::default(),
+        }
+    }
+
+    fn pan(&mut self, delta: Point) {
+        self.origin += delta;
+    }
+}
+
+impl<'b> Widget for BoardWidget<'b> {
+    fn render(self, area: tui::layout::Rect, buf: &mut tui::buffer::Buffer) {
+        for (_point, dx, dy) in self.board.window(
+            self.origin - Point::x(area.width as i64 / 2) - Point::y(area.height as i64 / 2),
+            area.width,
+            area.height,
+        ) {
+            buf.get_mut(dx, dy).set_symbol(tui::symbols::bar::FULL);
+        }
+    }
+}
+
+/// Builds board from string in the +x +y quadrant where '.' represents a dead cell and 'x'
+/// represents an alive one. Any other characters would result in an error.
+/// Lines are along the y-axis and chars are along the x-axis. The board can be naturally written
+/// meaning the first line is the line with the maximum y value.
+///
+/// For example,
+///  y
+///  ^
+///  2  ....x...
+///  1  ...xxx..
+///  0  ....x...
+///     01234567 > x
+impl FromStr for Board {
+    type Err = GameError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut board = Board::default();
+        for (y, line) in s.lines().rev().enumerate() {
+            for (x, char) in line.chars().enumerate() {
+                match char {
+                    '.' => {} // Do nothing, dead cell
+                    'x' => board.birth_cell(&(x as i64, y as i64).into()),
+                    c => {
+                        return Err(GameError::new(GameErrorKind::InvalidBoardChar {
+                            c,
+                            s: s.to_owned(),
+                            line: y as u16,
+                        }))
+                    }
+                }
+            }
+        }
+        Ok(board)
     }
 }
 
@@ -163,13 +351,13 @@ impl<const N: usize> From<[Position; N]> for Board {
 #[derive(Debug, Default)]
 struct GameOfLife {
     board: Board,
-    killed_cells: HashSet<Position>,
-    birthed_cells: HashSet<Position>,
+    killed_cells: HashSet<Point>,
+    birthed_cells: HashSet<Point>,
     generation: u32,
 }
 
-impl<const N: usize> From<[Position; N]> for GameOfLife {
-    fn from(value: [Position; N]) -> Self {
+impl<const N: usize> From<[Point; N]> for GameOfLife {
+    fn from(value: [Point; N]) -> Self {
         GameOfLife {
             board: Board::from(value),
             ..GameOfLife::default()
@@ -200,7 +388,6 @@ impl GameOfLife {
                     Cell::Alive(_) => num_alive += 1,
                 }
             }
-            println!("{num_alive}");
             match num_alive {
                 // Rule 1 & 2
                 0 | 1 | 4.. => {
@@ -223,24 +410,55 @@ impl GameOfLife {
     }
 }
 
-// Contains game, user config, UI state, handles events
-struct App {}
+impl FromStr for GameOfLife {
+    type Err = GameError;
 
-fn main() -> Result<(), io::Error> {
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(GameOfLife {
+            board: s.parse()?,
+            ..Default::default()
+        })
+    }
+}
+
+// Contains game, user config, UI state, handles events
+struct App {
+    game: GameOfLife,
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     // setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen, DisableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    terminal.draw(|f| {
-        let size = f.size();
-        let block = Block::default().title("Block").borders(Borders::ALL);
-        f.render_widget(block, size);
-    })?;
+    let mut game = ".xxx
+xxx."
+        .parse::<GameOfLife>()?;
+    println!("{:?}", game.board);
 
-    thread::sleep(Duration::from_millis(5000));
+    loop {
+        terminal.draw(|f| {
+            let size = f.size();
+            let board = BoardWidget::new(&game.board);
+            f.render_widget(board, size);
+        })?;
+
+        if poll(Duration::from_millis(750))? {
+            if let crossterm::event::Event::Key(KeyEvent {
+                code: KeyCode::Char('q'),
+                ..
+            }) = read()?
+            {
+                break;
+            }
+        }
+
+        game.step();
+        // println!("{:?}", game.board);
+    }
 
     // restore terminal
     disable_raw_mode()?;
@@ -254,7 +472,6 @@ fn main() -> Result<(), io::Error> {
     Ok(())
 }
 
-// TODO: impl FromStr for Board
 #[cfg(test)]
 mod test {
     use crate::*;
@@ -287,7 +504,7 @@ mod test {
     }
 
     #[test]
-    fn idle_board() {
+    fn still_lifes() {
         // Empty
         let mut game = GameOfLife::default();
         game.step();
@@ -324,5 +541,10 @@ mod test {
                 (0, -1).into()
             ])
         );
+    }
+
+    #[test]
+    fn oscillators() {
+        todo!()
     }
 }
