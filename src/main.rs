@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 
 use crossterm::{
-    event::{poll, read, DisableMouseCapture, KeyCode, KeyEvent},
+    event::{poll, read, DisableMouseCapture, KeyCode},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
