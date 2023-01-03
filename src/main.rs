@@ -1,20 +1,69 @@
 #![allow(dead_code)]
 
+mod adapter;
+mod command;
+mod event;
+mod model;
+mod program;
+
 use crossterm::{
-    event::{poll, read, DisableMouseCapture, KeyCode},
+    event::{
+        poll, read, DisableMouseCapture, EnableMouseCapture, KeyCode, KeyModifiers, MouseButton,
+        MouseEvent, MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use std::{collections::HashSet, fmt::Display, io, str::FromStr, time::Duration};
+use std::{
+    collections::HashSet,
+    fmt::Display,
+    fs::{self, File},
+    io::{self, Write},
+    str::FromStr,
+    time::{Duration, Instant},
+};
 use tui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
-    text::Text,
-    widgets::{Paragraph, Widget},
+    style::{Color, Style},
+    symbols::DOT,
+    text::{Spans, Text},
+    widgets::{Block, BorderType, Borders, Paragraph, Tabs, Widget},
     Terminal,
 };
 
+const LOG_FILE_NAME: &str = "gameoflife.log";
+
 // TODO: reorganize project
+
+fn log(s: &str) {
+    let mut temp_file = std::env::temp_dir();
+    temp_file.push(LOG_FILE_NAME);
+
+    if let Ok(mut f) = File::options()
+        .append(true)
+        .create(true)
+        .write(true)
+        .open(temp_file)
+    {
+        f.write(format!("[{:?}]: {}\n", Instant::now(), s).as_ref())
+            .ok();
+    };
+}
+
+fn get_logs() -> Vec<String> {
+    let mut temp_file = std::env::temp_dir();
+    temp_file.push(LOG_FILE_NAME);
+    let mut logs = Vec::default();
+
+    if let Ok(s) = fs::read_to_string(temp_file) {
+        for line in s.lines().rev() {
+            logs.push(line.to_owned());
+        }
+    }
+
+    logs
+}
 
 // Steps:
 // 1. Iterate through each alive cell and perform GoL rules
@@ -230,6 +279,14 @@ impl Board {
         self.board.remove(p);
     }
 
+    fn toggle_cell(&mut self, p: &Point) {
+        if self.board.contains(p) {
+            self.kill_cell(p);
+        } else {
+            self.birth_cell(p);
+        }
+    }
+
     fn iter(&self) -> impl Iterator<Item = &Point> + '_ {
         self.board.iter()
     }
@@ -263,6 +320,7 @@ impl<const N: usize> From<[Point; N]> for Board {
 struct BoardWidget<'b> {
     board: &'b Board,
     origin: Point,
+    block: Option<Block<'b>>,
     // TODO: zoom
 }
 
@@ -271,22 +329,41 @@ impl<'b> BoardWidget<'b> {
         BoardWidget {
             board,
             origin: Default::default(),
+            block: None,
         }
     }
 
-    fn pan(&mut self, delta: Point) {
-        self.origin += delta;
+    fn pan_to(mut self, origin: Point) -> Self {
+        self.origin = origin;
+        self
+    }
+
+    fn block(mut self, block: Block<'b>) -> Self {
+        self.block = Some(block);
+        self
     }
 }
 
 impl<'b> Widget for BoardWidget<'b> {
-    fn render(self, area: tui::layout::Rect, buf: &mut tui::buffer::Buffer) {
+    fn render(mut self, area: tui::layout::Rect, buf: &mut tui::buffer::Buffer) {
+        let board_area = match self.block.take() {
+            Some(b) => {
+                let inner_area = b.inner(area);
+                b.render(area, buf);
+                inner_area
+            }
+            None => area,
+        };
+
+        buf.set_style(board_area, Style::default().bg(Color::LightBlue));
+
         for (_point, dx, dy) in self.board.window(
-            self.origin - Point::x(area.width as i64 / 2) - Point::y(area.height as i64 / 2),
-            area.width,
-            area.height,
+            self.origin - Point::new(board_area.width as i64 / 2, board_area.height as i64 / 2),
+            board_area.width,
+            board_area.height,
         ) {
-            buf.get_mut(dx, dy).set_symbol(tui::symbols::bar::FULL);
+            buf.get_mut(board_area.x + dx, board_area.y + dy)
+                .set_symbol(tui::symbols::bar::FULL);
         }
     }
 }
@@ -412,8 +489,9 @@ impl FromStr for GameOfLife {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 enum AppState {
+    #[default]
     Stopped,
     Paused,
     Running,
@@ -429,6 +507,13 @@ impl AppState {
     }
 }
 
+#[derive(Debug, Default)]
+enum AppView {
+    #[default]
+    Game,
+    Logs,
+}
+
 // Contains game, user config, UI state, handles events
 #[derive(Debug)]
 struct App {
@@ -436,85 +521,166 @@ struct App {
     tick_rate: Duration,
     origin: Point,
     state: AppState,
+    view: AppView,
 }
 
 impl App {
     fn new(tick_rate: Duration) -> Self {
         App {
-            game: GameOfLife::default(),
             tick_rate,
-            origin: Point::default(),
-            state: AppState::Stopped,
+            game: Default::default(),
+            origin: Default::default(),
+            state: Default::default(),
+            view: Default::default(),
         }
     }
 }
 
+// TODO: this is all getting a little ugly
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, DisableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new(Duration::from_millis(750));
-    let board = "x..x.\n....x\nx...x\n.xxxx";
-    app.game.board_from_str(board)?;
+    let init_board = "x..x.\n....x\nx...x\n.xxxx";
+    app.game.board_from_str(init_board)?;
+
+    let mut step_time = Duration::default();
+    let mut frame_time = Duration::default();
+    let mut print_info = true;
 
     loop {
+        let frame_start = Instant::now();
+
         terminal.draw(|f| {
-            let board = BoardWidget::new(&app.game.board);
+            if print_info {
+                print_info = false;
+            }
+            let board = BoardWidget::new(&app.game.board)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::White)),
+                )
+                .pan_to(app.origin);
             let generation =
                 Paragraph::new(Text::from(format!("generation = {}", app.game.generation)));
             let tick_rate = Paragraph::new(Text::from(format!("tick rate = {:?}", app.tick_rate)));
             let state = Paragraph::new(Text::from(format!("state = {:?}", app.state)));
 
-            let chunks = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Length(20), Constraint::Min(0)])
-                .split(f.size());
-            let info_panel_area = chunks[0];
-            let board_area = chunks[1];
+            let titles = ["Game", "Logs"].iter().cloned().map(Spans::from).collect();
+            let tabs = Tabs::new(titles)
+                .block(Block::default().title("Tabs").borders(Borders::ALL))
+                .style(Style::default().fg(Color::White))
+                .highlight_style(Style::default().fg(Color::Yellow))
+                .divider(DOT);
+
+            let tabs = match app.view {
+                AppView::Game => tabs.select(0),
+                AppView::Logs => tabs.select(1),
+            };
 
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([Constraint::Length(4); 3])
-                .split(info_panel_area);
+                .constraints([Constraint::Length(3), Constraint::Percentage(100)])
+                .split(f.size());
 
-            let generation_area = chunks[0];
-            let tick_rate_area = chunks[1];
-            let state_area = chunks[2];
+            let tabs_area = chunks[0];
+            let main_area = chunks[1];
 
-            f.render_widget(generation, generation_area);
-            f.render_widget(tick_rate, tick_rate_area);
-            f.render_widget(state, state_area);
-            f.render_widget(board, board_area);
+            f.render_widget(tabs, tabs_area);
+            match app.view {
+                AppView::Game => {
+                    let chunks = Layout::default()
+                        .direction(Direction::Horizontal)
+                        .constraints([Constraint::Length(25), Constraint::Min(0)])
+                        .split(main_area);
+                    let info_panel_area = chunks[0];
+                    let board_area = chunks[1];
+
+                    let chunks = Layout::default()
+                        .direction(Direction::Vertical)
+                        .constraints([Constraint::Length(4); 6])
+                        .split(info_panel_area);
+
+                    let generation_area = chunks[0];
+                    let tick_rate_area = chunks[1];
+                    let state_area = chunks[2];
+                    let frame_time_area = chunks[3];
+                    let step_time_area = chunks[4];
+                    let origin_area = chunks[5];
+
+                    f.render_widget(generation, generation_area);
+                    f.render_widget(tick_rate, tick_rate_area);
+                    f.render_widget(state, state_area);
+                    f.render_widget(board, board_area);
+                    f.render_widget(
+                        Paragraph::new(Text::from(format!("origin = \n{:?}", app.origin))),
+                        origin_area,
+                    );
+                    f.render_widget(
+                        Paragraph::new(Text::from(format!("frame time = {:?}", frame_time))),
+                        frame_time_area,
+                    );
+                    f.render_widget(
+                        Paragraph::new(Text::from(format!("step time = {:?}", step_time))),
+                        step_time_area,
+                    );
+                }
+                AppView::Logs => {
+                    f.render_widget(Paragraph::new(Text::from(get_logs().join("\n"))), main_area);
+                }
+            };
         })?;
 
         if poll(app.tick_rate)? {
-            if let crossterm::event::Event::Key(key) = read()? {
-                match key.code {
-                    KeyCode::Char('q') => break,
-                    KeyCode::Char('j') => {
-                        app.tick_rate = app.tick_rate.saturating_sub(Duration::from_millis(50))
-                    }
-                    KeyCode::Char('k') => {
-                        app.tick_rate = app.tick_rate.saturating_add(Duration::from_millis(50))
-                    }
-                    KeyCode::Char(' ') => app.state.toggle(),
-                    KeyCode::Char('r') => {
-                        app.state = AppState::Stopped;
-                        app.game.board_from_str(board)?;
-                        app.game.generation = 0;
-                    }
-                    _ => {}
-                };
+            match read()? {
+                crossterm::event::Event::Key(key) => {
+                    match key.code {
+                        KeyCode::Char('1') => app.view = AppView::Game,
+                        KeyCode::Char('2') => app.view = AppView::Logs,
+                        KeyCode::Char('q') => break,
+                        KeyCode::Char('d') => {
+                            app.tick_rate = app.tick_rate.saturating_sub(Duration::from_millis(50))
+                        }
+                        KeyCode::Char('u') => {
+                            app.tick_rate = app.tick_rate.saturating_add(Duration::from_millis(50))
+                        }
+                        KeyCode::Char('h') => app.origin.dx(-1),
+                        KeyCode::Char('j') => app.origin.dy(-1),
+                        KeyCode::Char('k') => app.origin.dy(1),
+                        KeyCode::Char('l') => app.origin.dx(1),
+                        KeyCode::Char(' ') => app.state.toggle(),
+                        KeyCode::Char('r') => {
+                            app.state = AppState::Stopped;
+                            app.game.board_from_str(init_board)?;
+                            app.game.generation = 0;
+                            app.origin = Default::default();
+                        }
+                        _ => {}
+                    };
+                }
+                crossterm::event::Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column,
+                    row,
+                    modifiers: KeyModifiers::NONE,
+                }) => {}
+                _ => (),
             }
+        } else {
+            let step_start = Instant::now();
+            if let AppState::Running = app.state {
+                app.game.step();
+            }
+            step_time = Instant::now() - step_start;
         }
 
-        if let AppState::Running = app.state {
-            app.game.step();
-        }
+        frame_time = Instant::now() - frame_start;
     }
 
     // restore terminal
