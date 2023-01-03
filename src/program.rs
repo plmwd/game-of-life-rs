@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     io::{self, Stdout},
+    time::Duration,
 };
 
 use crossterm::{
@@ -10,7 +11,11 @@ use crossterm::{
 };
 use tui::{backend::CrosstermBackend, layout::Rect};
 
-use crate::{adapter::Terminal, model::Model};
+use crate::{
+    adapter::Terminal,
+    event::{IoProducer, Listener},
+    model::Model,
+};
 
 struct Program<M: Model<I, Msg = Msg>, I, Msg> {
     model: M,
@@ -42,6 +47,10 @@ impl<M: Model<I, Msg = Msg>, I, Msg> Program<M, I, Msg> {
         execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
+
+        let listener = Listener::default();
+
+        let io_producer = IoProducer::spawn(listener.subscribe(), Duration::from_millis(100));
 
         disable_raw_mode()?;
         execute!(

@@ -26,7 +26,7 @@ impl Default for Listener {
 }
 
 impl Listener {
-    fn subscribe(&self) -> EventSender {
+    pub fn subscribe(&self) -> EventSender {
         self.sender.clone()
     }
 
@@ -40,7 +40,7 @@ pub struct IoProducer {
 }
 
 impl IoProducer {
-    fn spawn(sender: EventSender, tick_rate: Duration) -> Self {
+    pub fn spawn(sender: EventSender, tick_rate: Duration) -> Self {
         let thread = thread::spawn(move || {
             let mut poll_time = tick_rate;
             loop {
