@@ -1,6 +1,4 @@
 use std::{
-    fs::File,
-    io::{Stderr, Write},
     sync::{
         atomic::AtomicBool,
         mpsc::{channel, Iter, Receiver, Sender},
@@ -16,7 +14,6 @@ use crossterm::{
         Event::{Key, Mouse},
         KeyEvent, MouseEvent,
     },
-    terminal::is_raw_mode_enabled,
 };
 
 pub type EventSender = Sender<Event>;

@@ -1,23 +1,18 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     fmt::{Debug, Display},
-    fs::File,
-    io::{self, Error, Stdout, Write},
+    io,
     time::Duration,
 };
 
 use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture},
+    event::DisableMouseCapture,
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use tui::{backend::CrosstermBackend, layout::Rect};
 
-use crate::event::{
-    self,
-    Event::{Key, Mouse, Tick},
-    IoProducer, Listener,
-};
+use crate::event::{IoProducer, Listener};
 use crate::{
     command::Command::{self, Chain, Exit, RegisterHitbox},
     model::Model,

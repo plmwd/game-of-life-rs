@@ -9,11 +9,8 @@ mod terminal;
 use command::Command;
 use crossterm::{
     event::{
-        poll, read, DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEvent, KeyModifiers,
-        MouseButton, MouseEvent, MouseEventKind,
+        KeyCode, KeyEvent,
     },
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use model::Model;
 use program::Program;
@@ -21,19 +18,15 @@ use std::{
     collections::HashSet,
     fmt::Display,
     fs::{self, File},
-    io::{self, Write},
-    os::unix::process::CommandExt,
+    io::{Write},
     str::FromStr,
     time::{Duration, Instant},
 };
 use tui::{
-    backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     style::{Color, Style},
-    symbols::DOT,
-    text::{Spans, Text},
-    widgets::{Block, BorderType, Borders, Paragraph, Tabs, Widget},
-    Terminal,
+    text::{Text},
+    widgets::{Block, Borders, Paragraph, Widget},
 };
 
 const LOG_FILE_NAME: &str = "gameoflife.log";
@@ -605,7 +598,7 @@ impl Model for App {
         let tick_rate_area = chunks[1];
         let state_area = chunks[2];
         let tick_count_area = chunks[3];
-        let step_time_area = chunks[4];
+        let _step_time_area = chunks[4];
         let origin_area = chunks[5];
 
         f.render_widget(generation, generation_area);
