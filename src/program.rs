@@ -6,7 +6,7 @@ use std::{
 };
 
 use crossterm::{
-    event::DisableMouseCapture,
+    event::{DisableMouseCapture, EnableMouseCapture},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -91,7 +91,7 @@ impl<Id: Ord + Copy> Program<Id> {
     pub fn run<M: Model<Id = Id>>(mut self, mut model: M) -> ProgramResult {
         let mut stdout = io::stdout();
         enable_raw_mode()?;
-        execute!(stdout, EnterAlternateScreen, DisableMouseCapture)?;
+        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
 

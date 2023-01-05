@@ -7,25 +7,21 @@ mod program;
 mod terminal;
 
 use command::Command;
-use crossterm::{
-    event::{
-        KeyCode, KeyEvent,
-    },
-};
+use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use model::Model;
 use program::Program;
 use std::{
     collections::HashSet,
     fmt::Display,
     fs::{self, File},
-    io::{Write},
+    io::Write,
     str::FromStr,
     time::{Duration, Instant},
 };
 use tui::{
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
-    text::{Text},
+    text::Text,
     widgets::{Block, Borders, Paragraph, Widget},
 };
 
@@ -317,7 +313,6 @@ impl<const N: usize> From<[Point; N]> for Board {
 struct BoardWidget<'b> {
     board: &'b Board,
     origin: Point,
-    block: Option<Block<'b>>,
     // TODO: zoom
 }
 
@@ -326,7 +321,6 @@ impl<'b> BoardWidget<'b> {
         BoardWidget {
             board,
             origin: Default::default(),
-            block: None,
         }
     }
 
@@ -334,32 +328,18 @@ impl<'b> BoardWidget<'b> {
         self.origin = origin;
         self
     }
-
-    fn block(mut self, block: Block<'b>) -> Self {
-        self.block = Some(block);
-        self
-    }
 }
 
 impl<'b> Widget for BoardWidget<'b> {
     fn render(mut self, area: tui::layout::Rect, buf: &mut tui::buffer::Buffer) {
-        let board_area = match self.block.take() {
-            Some(b) => {
-                let inner_area = b.inner(area);
-                b.render(area, buf);
-                inner_area
-            }
-            None => area,
-        };
-
-        buf.set_style(board_area, Style::default().bg(Color::LightBlue));
+        buf.set_style(area, Style::default().bg(Color::LightBlue));
 
         for (_point, dx, dy) in self.board.window(
-            self.origin - Point::new(board_area.width as i64 / 2, board_area.height as i64 / 2),
-            board_area.width,
-            board_area.height,
+            self.origin - Point::new(area.width as i64 / 2, area.height as i64 / 2),
+            area.width,
+            area.height,
         ) {
-            buf.get_mut(board_area.x + dx, board_area.y + dy)
+            buf.get_mut(area.x + dx, area.y + dy)
                 .set_symbol(tui::symbols::bar::FULL);
         }
     }
@@ -520,6 +500,8 @@ struct App {
     state: AppState,
     view: AppView,
     tick_count: u64,
+    board_click: Option<((u16, u16), (u16, u16))>,
+    mouse: (u16, u16),
 }
 
 impl App {
@@ -531,6 +513,8 @@ impl App {
             state: Default::default(),
             view: Default::default(),
             tick_count: 0,
+            board_click: None,
+            mouse: Default::default(),
         }
     }
 }
@@ -546,7 +530,7 @@ impl Model for App {
 
     fn update(
         &mut self,
-        _cx: &mut program::Context<Self::Id>,
+        cx: &mut program::Context<Self::Id>,
         event: event::Event,
     ) -> Option<command::Command<Self::Id>> {
         if let event::Event::Tick = event {
@@ -566,17 +550,26 @@ impl Model for App {
         {
             return Some(Command::Exit);
         };
+
+        if let event::Event::Mouse(MouseEvent {
+            column,
+            row,
+            kind: MouseEventKind::Up(MouseButton::Left),
+            ..
+        }) = event
+        {
+            self.mouse = (column, row);
+            if let Some((_id, rect)) = cx.find_hitbox(column, row) {
+                self.board_click = Some(((rect.x, rect.y), (column, row)));
+            } else {
+                self.board_click = None
+            }
+        }
         None
     }
 
     fn view(&self, f: &mut terminal::Frame) -> Option<command::Command<Self::Id>> {
-        let board = BoardWidget::new(&self.game.board)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::White)),
-            )
-            .pan_to(self.origin);
+        let board = BoardWidget::new(&self.game.board).pan_to(self.origin);
         let generation =
             Paragraph::new(Text::from(format!("generation = {}", self.game.generation)));
         let tick_rate = Paragraph::new(Text::from(format!("tick rate = {:?}", self.game_tick)));
@@ -591,15 +584,16 @@ impl Model for App {
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(4); 6])
+            .constraints([Constraint::Length(4); 7])
             .split(info_panel_area);
 
         let generation_area = chunks[0];
         let tick_rate_area = chunks[1];
         let state_area = chunks[2];
         let tick_count_area = chunks[3];
-        let _step_time_area = chunks[4];
-        let origin_area = chunks[5];
+        let origin_area = chunks[4];
+        let click_area = chunks[5];
+        let mouse_area = chunks[6];
 
         f.render_widget(generation, generation_area);
         f.render_widget(tick_rate, tick_rate_area);
@@ -613,12 +607,22 @@ impl Model for App {
             Paragraph::new(Text::from(format!("tick count = {:?}", self.tick_count))),
             tick_count_area,
         );
-        // f.render_widget(
-        //     Paragraph::new(Text::from(format!("step time = {:?}", step_time))),
-        //     step_time_area,
-        // );
+        f.render_widget(
+            Paragraph::new(Text::from(format!("mouse = {:?}", self.mouse))),
+            mouse_area,
+        );
+        if let Some((r, abs)) = self.board_click {
+            f.render_widget(
+                Paragraph::new(Text::from(format!(
+                    "board click\n= {:?}\n{:?}",
+                    abs,
+                    (abs.0 - r.0, abs.1 - r.1)
+                ))),
+                click_area,
+            );
+        }
 
-        None
+        Some(Command::RegisterHitbox(ComponentId::Board, board_area))
     }
 }
 
