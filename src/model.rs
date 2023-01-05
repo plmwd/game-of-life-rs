@@ -1,11 +1,8 @@
-use crossterm::event::{KeyEvent, MouseEvent};
+use crate::{command::Command, event::Event, program::Context, terminal::Frame};
 
-use crate::{adapter::Frame, command::Command, event::Event};
+pub trait Model {
+    type Id;
 
-pub trait Model<Id>: Default {
-    type Msg;
-
-    fn on(event: Event) -> Self::Msg;
-    fn update(msg: Self::Msg) -> Option<Command<Id>>;
-    fn view(f: Frame);
+    fn update(&mut self, cx: &mut Context<Self::Id>, event: Event) -> Option<Command<Self::Id>>;
+    fn view(&self, f: &mut Frame) -> Option<Command<Self::Id>>;
 }

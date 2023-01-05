@@ -1,24 +1,28 @@
 #![allow(dead_code)]
 
-mod adapter;
 mod command;
 mod event;
 mod model;
 mod program;
+mod terminal;
 
+use command::Command;
 use crossterm::{
     event::{
-        poll, read, DisableMouseCapture, EnableMouseCapture, KeyCode, KeyModifiers, MouseButton,
-        MouseEvent, MouseEventKind,
+        poll, read, DisableMouseCapture, EnableMouseCapture, KeyCode, KeyEvent, KeyModifiers,
+        MouseButton, MouseEvent, MouseEventKind,
     },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use model::Model;
+use program::Program;
 use std::{
     collections::HashSet,
     fmt::Display,
     fs::{self, File},
     io::{self, Write},
+    os::unix::process::CommandExt,
     str::FromStr,
     time::{Duration, Instant},
 };
@@ -518,180 +522,115 @@ enum AppView {
 #[derive(Debug)]
 struct App {
     game: GameOfLife,
-    tick_rate: Duration,
+    game_tick: Duration,
     origin: Point,
     state: AppState,
     view: AppView,
+    tick_count: u64,
 }
 
 impl App {
-    fn new(tick_rate: Duration) -> Self {
+    fn new(game_tick: Duration) -> Self {
         App {
-            tick_rate,
+            game_tick,
             game: Default::default(),
             origin: Default::default(),
             state: Default::default(),
             view: Default::default(),
+            tick_count: 0,
         }
     }
 }
 
-// TODO: this is all getting a little ugly
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // setup terminal
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+#[derive(Debug, Copy, Clone, Ord, Eq, PartialEq, PartialOrd)]
+enum ComponentId {
+    Board,
+    Controls,
+}
 
-    let mut app = App::new(Duration::from_millis(750));
-    let init_board = "x..x.\n....x\nx...x\n.xxxx";
-    app.game.board_from_str(init_board)?;
+impl Model for App {
+    type Id = ComponentId;
 
-    let mut step_time = Duration::default();
-    let mut frame_time = Duration::default();
-    let mut print_info = true;
-
-    loop {
-        let frame_start = Instant::now();
-
-        terminal.draw(|f| {
-            if print_info {
-                print_info = false;
-            }
-            let board = BoardWidget::new(&app.game.board)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_style(Style::default().fg(Color::White)),
-                )
-                .pan_to(app.origin);
-            let generation =
-                Paragraph::new(Text::from(format!("generation = {}", app.game.generation)));
-            let tick_rate = Paragraph::new(Text::from(format!("tick rate = {:?}", app.tick_rate)));
-            let state = Paragraph::new(Text::from(format!("state = {:?}", app.state)));
-
-            let titles = ["Game", "Logs"].iter().cloned().map(Spans::from).collect();
-            let tabs = Tabs::new(titles)
-                .block(Block::default().title("Tabs").borders(Borders::ALL))
-                .style(Style::default().fg(Color::White))
-                .highlight_style(Style::default().fg(Color::Yellow))
-                .divider(DOT);
-
-            let tabs = match app.view {
-                AppView::Game => tabs.select(0),
-                AppView::Logs => tabs.select(1),
-            };
-
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(3), Constraint::Percentage(100)])
-                .split(f.size());
-
-            let tabs_area = chunks[0];
-            let main_area = chunks[1];
-
-            f.render_widget(tabs, tabs_area);
-            match app.view {
-                AppView::Game => {
-                    let chunks = Layout::default()
-                        .direction(Direction::Horizontal)
-                        .constraints([Constraint::Length(25), Constraint::Min(0)])
-                        .split(main_area);
-                    let info_panel_area = chunks[0];
-                    let board_area = chunks[1];
-
-                    let chunks = Layout::default()
-                        .direction(Direction::Vertical)
-                        .constraints([Constraint::Length(4); 6])
-                        .split(info_panel_area);
-
-                    let generation_area = chunks[0];
-                    let tick_rate_area = chunks[1];
-                    let state_area = chunks[2];
-                    let frame_time_area = chunks[3];
-                    let step_time_area = chunks[4];
-                    let origin_area = chunks[5];
-
-                    f.render_widget(generation, generation_area);
-                    f.render_widget(tick_rate, tick_rate_area);
-                    f.render_widget(state, state_area);
-                    f.render_widget(board, board_area);
-                    f.render_widget(
-                        Paragraph::new(Text::from(format!("origin = \n{:?}", app.origin))),
-                        origin_area,
-                    );
-                    f.render_widget(
-                        Paragraph::new(Text::from(format!("frame time = {:?}", frame_time))),
-                        frame_time_area,
-                    );
-                    f.render_widget(
-                        Paragraph::new(Text::from(format!("step time = {:?}", step_time))),
-                        step_time_area,
-                    );
-                }
-                AppView::Logs => {
-                    f.render_widget(Paragraph::new(Text::from(get_logs().join("\n"))), main_area);
-                }
-            };
-        })?;
-
-        if poll(app.tick_rate)? {
-            match read()? {
-                crossterm::event::Event::Key(key) => {
-                    match key.code {
-                        KeyCode::Char('1') => app.view = AppView::Game,
-                        KeyCode::Char('2') => app.view = AppView::Logs,
-                        KeyCode::Char('q') => break,
-                        KeyCode::Char('d') => {
-                            app.tick_rate = app.tick_rate.saturating_sub(Duration::from_millis(50))
-                        }
-                        KeyCode::Char('u') => {
-                            app.tick_rate = app.tick_rate.saturating_add(Duration::from_millis(50))
-                        }
-                        KeyCode::Char('h') => app.origin.dx(-1),
-                        KeyCode::Char('j') => app.origin.dy(-1),
-                        KeyCode::Char('k') => app.origin.dy(1),
-                        KeyCode::Char('l') => app.origin.dx(1),
-                        KeyCode::Char(' ') => app.state.toggle(),
-                        KeyCode::Char('r') => {
-                            app.state = AppState::Stopped;
-                            app.game.board_from_str(init_board)?;
-                            app.game.generation = 0;
-                            app.origin = Default::default();
-                        }
-                        _ => {}
-                    };
-                }
-                crossterm::event::Event::Mouse(MouseEvent {
-                    kind: MouseEventKind::Down(MouseButton::Left),
-                    column,
-                    row,
-                    modifiers: KeyModifiers::NONE,
-                }) => {}
-                _ => (),
-            }
-        } else {
-            let step_start = Instant::now();
-            if let AppState::Running = app.state {
-                app.game.step();
-            }
-            step_time = Instant::now() - step_start;
+    fn update(
+        &mut self,
+        _cx: &mut program::Context<Self::Id>,
+        event: event::Event,
+    ) -> Option<command::Command<Self::Id>> {
+        if let event::Event::Tick = event {
+            self.tick_count += 1;
         }
-
-        frame_time = Instant::now() - frame_start;
+        if let event::Event::Key(KeyEvent {
+            code: KeyCode::Char(' '),
+            ..
+        }) = event
+        {
+            self.state.toggle();
+        };
+        if let event::Event::Key(KeyEvent {
+            code: KeyCode::Char('q'),
+            ..
+        }) = event
+        {
+            return Some(Command::Exit);
+        };
+        None
     }
 
-    // restore terminal
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
+    fn view(&self, f: &mut terminal::Frame) -> Option<command::Command<Self::Id>> {
+        let board = BoardWidget::new(&self.game.board)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::White)),
+            )
+            .pan_to(self.origin);
+        let generation =
+            Paragraph::new(Text::from(format!("generation = {}", self.game.generation)));
+        let tick_rate = Paragraph::new(Text::from(format!("tick rate = {:?}", self.game_tick)));
+        let state = Paragraph::new(Text::from(format!("state = {:?}", self.state)));
 
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(25), Constraint::Min(0)])
+            .split(f.size());
+        let info_panel_area = chunks[0];
+        let board_area = chunks[1];
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(4); 6])
+            .split(info_panel_area);
+
+        let generation_area = chunks[0];
+        let tick_rate_area = chunks[1];
+        let state_area = chunks[2];
+        let tick_count_area = chunks[3];
+        let step_time_area = chunks[4];
+        let origin_area = chunks[5];
+
+        f.render_widget(generation, generation_area);
+        f.render_widget(tick_rate, tick_rate_area);
+        f.render_widget(state, state_area);
+        f.render_widget(board, board_area);
+        f.render_widget(
+            Paragraph::new(Text::from(format!("origin = \n{:?}", self.origin))),
+            origin_area,
+        );
+        f.render_widget(
+            Paragraph::new(Text::from(format!("tick count = {:?}", self.tick_count))),
+            tick_count_area,
+        );
+        // f.render_widget(
+        //     Paragraph::new(Text::from(format!("step time = {:?}", step_time))),
+        //     step_time_area,
+        // );
+
+        None
+    }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    Program::new().run(App::new(Duration::from_millis(75)))?;
     Ok(())
 }
 
