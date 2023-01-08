@@ -8,12 +8,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crossterm::{
-    event::{
-        poll, read,
-        Event::{Key, Mouse},
-        KeyEvent, MouseEvent,
-    },
+use crossterm::event::{
+    poll, read,
+    Event::{Key, Mouse},
+    KeyEvent, MouseEvent,
 };
 
 pub type EventSender = Sender<Event>;

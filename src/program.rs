@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeMap,
     fmt::{Debug, Display},
     io,
     time::Duration,
@@ -10,22 +9,27 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use tui::{backend::CrosstermBackend, layout::Rect};
+use tui::{backend::CrosstermBackend};
 
 use crate::event::{IoProducer, Listener};
 use crate::{
-    command::Command::{self, Chain, Exit, RegisterHitbox},
     model::Model,
-    terminal::{within, Terminal},
+    terminal::{Terminal},
 };
 
 // TODO: Timer commands
 // Timer (one-shot and periodic) commands which take a Duration and Fn |&mut Model|. They don't
 // generate any events (?) since they're essentially an async Mode::update. All timer state and
 // logic is maintained by Program.
-pub struct Program<Id> {
-    hitboxes: BTreeMap<Id, Rect>,
+pub struct Program {
     tick_rate: Duration,
+}
+
+type ComponentId = u64;
+
+#[derive(Debug, Clone)]
+pub enum Command {
+    Exit,
 }
 
 #[derive(Debug)]
@@ -43,21 +47,14 @@ impl Display for ProgramError {
 
 impl std::error::Error for ProgramError {}
 
-pub struct Context<'a, Id> {
-    prog: &'a Program<Id>,
+#[derive(Debug, Default)]
+pub struct Context {
+    cmds: Vec<Command>,
 }
 
-impl<'a, Id: Copy + Ord> Context<'a, Id> {
-    fn new(prog: &'a Program<Id>) -> Self {
-        Context { prog }
-    }
-
-    pub fn find_hitbox(&self, x: u16, y: u16) -> Option<(Id, Rect)> {
-        self.prog
-            .hitboxes
-            .iter()
-            .find(|(_id, rect)| within(rect, x, y))
-            .map(|(id, rect)| (*id, *rect))
+impl Context {
+    pub fn run(&mut self, cmd: Command) {
+        self.cmds.push(cmd);
     }
 }
 
@@ -75,10 +72,9 @@ impl From<std::sync::mpsc::RecvError> for ProgramError {
 
 pub type ProgramResult = Result<(), ProgramError>;
 
-impl<Id: Ord + Copy> Program<Id> {
+impl Program {
     pub fn new() -> Self {
         Self {
-            hitboxes: Default::default(),
             tick_rate: Duration::from_millis(15),
         }
     }
@@ -88,7 +84,7 @@ impl<Id: Ord + Copy> Program<Id> {
         self
     }
 
-    pub fn run<M: Model<Id = Id>>(mut self, mut model: M) -> ProgramResult {
+    pub fn run<M: Model>(mut self, mut model: M) -> ProgramResult {
         let mut stdout = io::stdout();
         enable_raw_mode()?;
         execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -111,45 +107,27 @@ impl<Id: Ord + Copy> Program<Id> {
         ret
     }
 
-    fn run_event_loop<M: Model<Id = Id>>(
+    fn run_event_loop<M: Model>(
         &mut self,
         terminal: &mut Terminal,
         listener: Listener,
         model: &mut M,
     ) -> ProgramResult {
+        let mut cx = Context::default();
         loop {
-            let mut cx = Context::new(self);
             let event = listener.next()?;
-            let cmd = model.update(&mut cx, event);
-            match cmd {
-                Some(Command::Exit) => break,
-                Some(cmd) => self.execute_cmd(cmd),
-                _ => (),
-            };
-            let mut cmd = None;
-            terminal.draw(|f| cmd = model.view(f))?;
-            match cmd {
-                Some(Command::Exit) => break,
-                Some(cmd) => self.execute_cmd(cmd),
-                _ => (),
-            };
-        }
-
-        Ok(())
-    }
-
-    fn execute_cmd(&mut self, cmd: Command<Id>) {
-        match cmd {
-            Chain(cmds) => {
-                for cmd in cmds {
-                    self.execute_cmd(cmd);
+            model.update(&mut cx, event);
+            for cmd in &cx.cmds {
+                match cmd {
+                    Command::Exit => return Ok(()),
                 }
             }
-            RegisterHitbox(id, area) => {
-                self.hitboxes.insert(id, area);
+            terminal.draw(|f| model.view(&mut cx, f))?;
+            for cmd in &cx.cmds {
+                match cmd {
+                    Command::Exit => return Ok(()),
+                }
             }
-            Exit => (),
-            _ => (),
-        };
+        }
     }
 }
