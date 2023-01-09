@@ -9,13 +9,10 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use tui::{backend::CrosstermBackend};
+use tui::backend::CrosstermBackend;
 
-use crate::event::{IoProducer, Listener};
-use crate::{
-    model::Model,
-    terminal::{Terminal},
-};
+use crate::event::{Event, IoProducer, Listener, Timer};
+use crate::{model::Model, terminal::Terminal};
 
 // TODO: Timer commands
 // Timer (one-shot and periodic) commands which take a Duration and Fn |&mut Model|. They don't
@@ -29,6 +26,7 @@ type ComponentId = u64;
 
 #[derive(Debug, Clone)]
 pub enum Command {
+    SetTickRate(Duration),
     Exit,
 }
 
@@ -91,12 +89,8 @@ impl Program {
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
 
-        let listener: Listener = Listener::default();
-        let io_producer = IoProducer::spawn(listener.subscribe(), self.tick_rate);
+        let ret = self.run_event_loop(&mut terminal, &mut model);
 
-        let ret = self.run_event_loop(&mut terminal, listener, &mut model);
-
-        io_producer.kill();
         disable_raw_mode()?;
         execute!(
             terminal.backend_mut(),
@@ -110,22 +104,39 @@ impl Program {
     fn run_event_loop<M: Model>(
         &mut self,
         terminal: &mut Terminal,
-        listener: Listener,
         model: &mut M,
     ) -> ProgramResult {
         let mut cx = Context::default();
+        let listener: Listener = Listener::default();
+        let _io_producer = IoProducer::spawn(listener.subscribe());
+        let tick_producer =
+            Timer::spawn(listener.subscribe(), Duration::from_millis(50), Event::Tick);
+        let _render_tick_producer = Timer::spawn(
+            listener.subscribe(),
+            Duration::from_millis(15),
+            Event::Render,
+        );
+
+        let execute_cmd = |cmd: &Command| {
+            if let Command::SetTickRate(dur) = cmd {
+                tick_producer.set_period(*dur);
+            }
+        };
+
         loop {
             let event = listener.next()?;
             model.update(&mut cx, event);
             for cmd in &cx.cmds {
                 match cmd {
                     Command::Exit => return Ok(()),
+                    cmd => execute_cmd(cmd),
                 }
             }
             terminal.draw(|f| model.view(&mut cx, f))?;
             for cmd in &cx.cmds {
                 match cmd {
                     Command::Exit => return Ok(()),
+                    cmd => execute_cmd(cmd),
                 }
             }
         }

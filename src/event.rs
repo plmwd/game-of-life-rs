@@ -2,7 +2,7 @@ use std::{
     sync::{
         atomic::AtomicBool,
         mpsc::{channel, Iter, Receiver, Sender},
-        Arc,
+        Arc, RwLock,
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -44,54 +44,57 @@ impl Listener {
 }
 
 pub struct IoProducer {
-    thread: JoinHandle<()>,
-    running: Arc<AtomicBool>,
+    pub thread: JoinHandle<()>,
 }
 
 impl IoProducer {
-    pub fn kill(self) {
-        self.running
-            .store(false, std::sync::atomic::Ordering::Relaxed)
-    }
-    pub fn spawn(sender: EventSender, tick_rate: Duration) -> Self {
-        let running = Arc::new(AtomicBool::new(true));
-        let is_running = running.clone();
-        let thread = thread::spawn(move || {
-            let mut poll_time = tick_rate;
-            loop {
-                let start = Instant::now();
-
-                if !is_running.load(std::sync::atomic::Ordering::Relaxed) {
-                    break;
-                }
-
-                if poll(poll_time).unwrap() {
-                    match read() {
-                        Ok(Key(e)) => sender.send(e.into()).unwrap(),
-                        Ok(Mouse(e)) => sender.send(e.into()).unwrap(),
-                        _ => (),
-                    };
-                } else {
-                    sender.send(Event::Tick).unwrap();
-                }
-
-                // Try to tick tick_rate duration
-                let duration = Instant::now() - start;
-                poll_time = if duration > poll_time {
-                    tick_rate
-                } else {
-                    tick_rate - poll_time
-                }
-            }
+    pub fn spawn(sender: EventSender) -> Self {
+        let thread = thread::spawn(move || loop {
+            match read() {
+                Ok(Key(e)) => sender.send(e.into()).unwrap(),
+                Ok(Mouse(e)) => sender.send(e.into()).unwrap(),
+                _ => (),
+            };
         });
-        Self { thread, running }
+        Self { thread }
     }
 }
 
-#[derive(Debug)]
+pub struct Timer {
+    pub thread: JoinHandle<()>,
+    lock: Arc<RwLock<Duration>>,
+}
+
+impl Timer {
+    pub fn spawn(sender: EventSender, period: Duration, event: Event) -> Self {
+        let lock = Arc::new(RwLock::new(period));
+        let thread = {
+            let lock = lock.clone();
+            thread::spawn(move || {
+                let mut tick_rate = period;
+                loop {
+                    sender.send(event).ok();
+                    if let Ok(new_tick_rate) = lock.try_read() {
+                        tick_rate = *new_tick_rate;
+                    }
+                    thread::sleep(tick_rate);
+                }
+            })
+        };
+
+        Self { thread, lock }
+    }
+
+    pub fn set_period(&self, period: Duration) {
+        *self.lock.write().unwrap() = period;
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
 pub enum Event {
     Key(KeyEvent),
     Mouse(MouseEvent),
+    Render,
     Tick,
 }
 

@@ -35,6 +35,7 @@ use widgets::BoardWidget;
 // 6. Change grid color based:
 //      - visited cells
 //      - birth/death of cells
+// 7. Add origin axis
 
 const QUEEN_BEE_BOARD: &str = "xx..\nx.x.\n...x\nx..x\n...x\nx.x.\nxx..";
 
@@ -134,6 +135,26 @@ impl Model for App {
                 modifiers: KeyModifiers::NONE,
                 ..
             }) => cx.run(Command::Exit),
+            Event::Key(KeyEvent {
+                code: KeyCode::Char('h'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            }) => self.origin.dx(-1),
+            Event::Key(KeyEvent {
+                code: KeyCode::Char('j'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            }) => self.origin.dy(-1),
+            Event::Key(KeyEvent {
+                code: KeyCode::Char('k'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            }) => self.origin.dy(1),
+            Event::Key(KeyEvent {
+                code: KeyCode::Char('l'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            }) => self.origin.dx(1),
             Event::Key(KeyEvent {
                 code: KeyCode::Char('c'),
                 modifiers: KeyModifiers::NONE,
